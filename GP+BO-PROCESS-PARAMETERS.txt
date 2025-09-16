@@ -1,0 +1,195 @@
+ 
+
+
+import GPy
+import GPyOpt
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.interpolate import griddata
+
+np.random.seed(42)
+
+
+X_initial = np.array([
+    [0.81, 0.33, 0.48], [0.9, 0.3301, 0.4801], [1, 0.329, 0.479],
+    [0.901, 0.17, 0.4802], [0.899, 0.3302, 0.478], [0.903, 1, 0.4803],
+    [0.904, 0.3303, 0.2], [0.898, 0.328, 0.4804], [0.897, 0.3304, 1],
+    [0.71, 0.18, 0.64], [0.51, 0.1801, 0.639], [0.98, 0.33, 0.8], [0.9, 0.1803, 0.49],
+    
+])
+
+Y1_initial = np.array([
+    [0.517], [0.580], [0.540], [0.295], [0.607], [0.991],
+    [0.362], [0.528], [0.632], [0.155], [0.001], [0.639], [0.294],
+    
+])
+
+Y2_initial = np.array([
+    [0.583], [0.740], [0.737], [0.460], [0.709], [1],
+    [0.494], [0.751], [0.841], [0.261], [0.001], [0.793], [0.461],
+    
+])
+
+
+alpha = 0.4
+
+
+Y_combined_initial = alpha * Y1_initial - (1 - alpha) * Y2_initial
+
+
+bounds = [
+    {'name': 'A', 'type': 'continuous', 'domain': (0.5, 1)},
+    {'name': 'B', 'type': 'continuous', 'domain': (0.15, 1)},
+    {'name': 'C', 'type': 'continuous', 'domain': (0.2, 1)}
+]
+
+
+kernel = GPy.kern.RBF(input_dim=3, variance=500, lengthscale=0.5)
+
+model_Y1 = GPy.models.GPRegression(X_initial, Y1_initial, kernel.copy())
+model_Y1.Gaussian_noise.variance = 1e-4
+
+model_Y2 = GPy.models.GPRegression(X_initial, Y2_initial, kernel.copy())
+model_Y2.Gaussian_noise.variance = 1e-4
+
+
+def objective_function(X):
+    X = np.atleast_2d(X)
+    Y1_pred, _ = model_Y1.predict(X)
+    Y2_pred, _ = model_Y2.predict(X)
+    return alpha * Y1_pred - (1 - alpha) * Y2_pred
+
+
+optimizer = GPyOpt.methods.BayesianOptimization(
+    f=None,
+    domain=bounds,
+    model_type='GP',
+    acquisition_type='EI',
+    exact_feval=True,
+    X=X_initial,
+    Y=Y_combined_initial,
+    normalize_Y=True
+)
+
+ 
+n_iterations = 10
+for _ in range(n_iterations):
+    suggested = optimizer.suggest_next_locations()
+    Y1_pred, _ = model_Y1.predict(suggested)
+    Y2_pred, _ = model_Y2.predict(suggested)
+
+    if Y1_pred <= 0 or Y2_pred <= 0:
+        print(" Skipped a point due to negative Y1 or Y2.")
+        continue
+
+    Y_combined_pred = alpha * Y1_pred - (1 - alpha) * Y2_pred
+    optimizer.X = np.vstack((optimizer.X, suggested))
+    optimizer.Y = np.vstack((optimizer.Y, Y_combined_pred))
+    model_Y1.set_XY(optimizer.X, alpha * optimizer.Y + (1 - alpha) * Y2_pred)
+    model_Y2.set_XY(optimizer.X, ((alpha * optimizer.Y - alpha * Y1_pred) / (-(1 - alpha))))
+
+
+X_final = optimizer.X
+Y_combined_final = optimizer.Y
+Y1_final, _ = model_Y1.predict(X_final)
+Y2_final, _ = model_Y2.predict(X_final)
+
+print(f"\n Final recommended parameters: {X_final[-1]}")
+print(f"  Predicted Y_combined: {Y_combined_final[-1]}")
+print(f"  Predicted Y1 (cost): {Y1_final[-1]}")
+print(f"  Predicted Y2 (profit): {Y2_final[-1]}")
+
+
+A_vals = np.linspace(0.5, 1, 30)
+B_vals = np.linspace(0.15, 1, 30)
+A_grid, B_grid = np.meshgrid(A_vals, B_vals)
+
+
+Y1_interp = griddata(X_initial[:, :2], Y1_initial.flatten(), (A_grid, B_grid), method='linear')
+Y2_interp = griddata(X_initial[:, :2], Y2_initial.flatten(), (A_grid, B_grid), method='linear')
+
+ 
+fig = plt.figure(figsize=(12, 5))
+ax1 = fig.add_subplot(121, projection='3d')
+cost_surface = ax1.plot_surface(A_grid, B_grid, Y1_interp, cmap='coolwarm', alpha=0.5)
+fig.colorbar(cost_surface, ax=ax1, shrink=0.5, aspect=10)
+ax1.set_xlabel('A')
+ax1.set_ylabel('B')
+ax1.set_zlabel('Cost (Y1)')
+ax1.set_title('3D Surface Plot of Cost (Y1)')
+
+ax2 = fig.add_subplot(122, projection='3d')
+profit_surface = ax2.plot_surface(A_grid, B_grid, Y2_interp, cmap='viridis', alpha=0.5)
+fig.colorbar(profit_surface, ax=ax2, shrink=0.5, aspect=10)
+ax2.set_xlabel('A')
+ax2.set_ylabel('B')
+ax2.set_zlabel('Profit (Y2)')
+ax2.set_title('3D Surface Plot of Profit (Y2)')
+plt.show()
+
+def plot_1d_subset(param_name, param_values, param_index, fixed_indices, fixed_values, X_subset, Y_subset, title):
+    num_points = len(param_values)
+    X_slice = np.zeros((num_points, X_initial.shape[1]))
+    X_slice[:, param_index] = param_values.flatten()
+    for i, idx in enumerate(fixed_indices):
+        X_slice[:, idx] = fixed_values[i]
+
+  
+    Y1_mean, Y1_var = model_Y1.predict(X_slice)
+    Y2_mean, Y2_var = model_Y2.predict(X_slice)
+
+    
+    Y_mean = alpha * Y1_mean - (1 - alpha) * Y2_mean
+    Y_var = alpha**2 * Y1_var + (1 - alpha)**2 * Y2_var  
+    Y_std = np.sqrt(Y_var)
+
+    plt.figure(figsize=(12, 5))
+    plt.plot(param_values, Y_mean, 'b-', label='Y)')
+    plt.fill_between(param_values.flatten(),
+                     (Y_mean - 1.5 * Y_std).flatten(),
+                     (Y_mean + 1.5 * Y_std).flatten(),
+                     color='b', alpha=0.2, label='Confidence Interval')
+    plt.scatter(X_subset[:, param_index], Y_subset, color='r', s=50, zorder=5, label='Subset Data Points')
+    plt.xlabel(f'Parameter {param_name}')
+    plt.ylabel('Y')
+    plt.title(title)
+    plt.legend()
+    plt.show()
+
+
+
+A_values = np.linspace(0.5, 1, 50).reshape(-1, 1)
+plot_1d_subset(
+    'A', 
+    A_values, 
+    0, 
+    [1, 2], 
+    [np.mean(X_initial[:5, i]) for i in range(1, 3)], 
+    X_initial[:3], 
+    Y_combined_initial[:3],  
+    'Gaussian Process Prediction (Varying A, Subset)'
+)
+
+B_values = np.linspace(0, 1, 50).reshape(-1, 1)
+plot_1d_subset(
+    'B', 
+    B_values, 
+    1, 
+    [0, 2], 
+    [np.mean(X_initial[3:6, i]) for i in [0, 2]], 
+    X_initial[3:6], 
+    Y_combined_initial[3:6],  
+    'Gaussian Process Prediction (Varying B, Subset)'
+)
+
+C_values = np.linspace(0, 1, 50).reshape(-1, 1)
+plot_1d_subset(
+    'C', 
+    C_values, 
+    2, 
+    [0, 1], 
+    [np.mean(X_initial[6:9, i]) for i in [0, 1]], 
+    X_initial[6:9], 
+    Y_combined_initial[6:9],  
+    'Gaussian Process Prediction (Varying C, Subset)'
+)
